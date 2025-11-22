@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Isaac Sim Orchestration Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Isaac Sim Orchestration Dashboard</h1>
+            <div class="header-info">
+                <span id="status-indicator" class="status-badge">Loading...</span>
+                <button id="cleanup-all-btn" class="btn btn-danger">Cleanup All</button>
+                <button id="refresh-btn" class="btn btn-secondary">Refresh</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="instances-grid" id="instances-grid">
+                <!-- Instance cards will be dynamically inserted here -->
+            </div>
+        </main>
+
+        <footer>
+            <p>Isaac Sim Multiple Instance Orchestration | WebRTC Streaming</p>
+        </footer>
+    </div>
+
+    <!-- Modal for logs -->
+    <div id="logs-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Instance Logs</h2>
+                <span class="close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <pre id="logs-content"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+
+

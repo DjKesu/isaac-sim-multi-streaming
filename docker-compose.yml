@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  orchestrator:
+    build: .
+    container_name: isaac-sim-orchestrator
+    ports:
+      - "8000:8000"
+      # Expose ports for Isaac Sim instances (4 instances)
+      - "8211-8214:8211-8214"  # HTTP ports
+      - "8011-8014:8011-8014"  # WebRTC ports
+      - "8899-8902:8899-8902"  # Native streaming ports
+    volumes:
+      # Mount Docker socket to allow orchestrator to manage containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount app code for development (comment out for production)
+      - ./app:/app/app
+      - ./static:/app/static
+    environment:
+      - ISAAC_MAX_INSTANCES=4
+      - ISAAC_ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim:2023.1.1
+      - ISAAC_GPU_ENABLED=true
+      - ISAAC_ENABLE_WEBRTC=true
+    restart: unless-stopped
+    networks:
+      - isaac-network
+
+networks:
+  isaac-network:
+    driver: bridge
+
+

@@ -1,0 +1,49 @@
+{
+  "description": "Configuration template for Isaac Sim instances",
+  "instances": [
+    {
+      "instance_id": 0,
+      "name": "Instance 0",
+      "scene": "default",
+      "description": "First Isaac Sim instance"
+    },
+    {
+      "instance_id": 1,
+      "name": "Instance 1",
+      "scene": "default",
+      "description": "Second Isaac Sim instance"
+    },
+    {
+      "instance_id": 2,
+      "name": "Instance 2",
+      "scene": "default",
+      "description": "Third Isaac Sim instance"
+    },
+    {
+      "instance_id": 3,
+      "name": "Instance 3",
+      "scene": "default",
+      "description": "Fourth Isaac Sim instance"
+    }
+  ],
+  "webrtc_settings": {
+    "enabled": true,
+    "ice_servers": [
+      {
+        "urls": "stun:stun.l.google.com:19302"
+      }
+    ]
+  },
+  "performance": {
+    "max_fps": 60,
+    "physics_rate": 60,
+    "rendering_quality": "high"
+  },
+  "resource_limits": {
+    "memory_per_instance": "8GB",
+    "gpu_memory_fraction": 0.25,
+    "cpu_cores": 2
+  }
+}
+
+
