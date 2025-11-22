@@ -6,6 +6,7 @@ from docker.models.containers import Container
 from docker.errors import DockerException, NotFound, APIError
 from typing import Dict, Optional, List
 import logging
+import subprocess
 from .config import settings, get_instance_ports
 
 logger = logging.getLogger(__name__)
@@ -22,21 +23,72 @@ class DockerManager:
         self.docker_available = False
         
         try:
-            # Try with explicit socket path first
-            self.client = docker.DockerClient(base_url='unix://var/run/docker.sock')
-            # Test connection
-            self.client.ping()
+            # Try multiple connection methods
+            # Method 1: Try default (from_env) but catch and try explicit socket
+            try:
+                self.client = docker.from_env()
+                self.client.ping()
+            except Exception as e1:
+                logger.debug(f"from_env failed: {e1}")
+                # Method 2: Try explicit unix socket
+                try:
+                    self.client = docker.DockerClient(base_url='unix:///var/run/docker.sock')
+                    self.client.ping()
+                except Exception as e2:
+                    logger.debug(f"explicit socket failed: {e2}")
+                    raise e2
+            
             self.docker_available = True
             logger.info("Docker client initialized successfully")
         except Exception as e:
-            logger.warning(f"Docker not available: {e}")
-            logger.warning("Service will run in limited mode. Please ensure Docker is installed and running.")
-            self.client = None
+            logger.warning(f"Docker Python client not available: {e}")
+            # Check if Docker CLI is available as fallback
+            try:
+                import subprocess
+                result = subprocess.run(['docker', 'ps'], capture_output=True, timeout=5, check=True)
+                logger.info("Docker CLI is available - using subprocess fallback")
+                self.docker_available = True
+                self.client = None  # Will use subprocess instead
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as cli_error:
+                logger.error(f"Docker CLI also not available: {cli_error}")
+                logger.error("Service cannot manage containers. Please ensure Docker is installed and running.")
+                self.docker_available = False
+                self.client = None
     
     def _check_docker(self):
         """Check if Docker is available and raise error if not"""
-        if not self.docker_available or self.client is None:
+        if not self.docker_available:
             raise DockerException("Docker is not available. Please install and start Docker service.")
+    
+    def _docker_cmd(self, cmd: List[str], check: bool = True) -> subprocess.CompletedProcess:
+        """Run a docker command via subprocess"""
+        import subprocess
+        full_cmd = ['docker'] + cmd
+        try:
+            return subprocess.run(full_cmd, capture_output=True, text=True, check=check, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise DockerException(f"Docker command timed out: {' '.join(full_cmd)}")
+        except subprocess.CalledProcessError as e:
+            raise DockerException(f"Docker command failed: {' '.join(full_cmd)} - {e.stderr}")
+    
+    def _container_exists(self, container_name: str) -> bool:
+        """Check if container exists using subprocess"""
+        try:
+            result = self._docker_cmd(['ps', '-a', '--filter', f'name={container_name}', '--format', '{{.Names}}'], check=False)
+            return container_name in result.stdout
+        except Exception:
+            return False
+    
+    def _get_container_status(self, container_name: str) -> Optional[str]:
+        """Get container status using subprocess"""
+        try:
+            result = self._docker_cmd(['ps', '-a', '--filter', f'name={container_name}', '--format', '{{.Status}}'], check=False)
+            if result.stdout.strip():
+                status_line = result.stdout.strip().split()[0]
+                return status_line.lower()
+            return None
+        except Exception:
+            return None
     
     def _get_container_name(self, instance_id: int) -> str:
         """Generate container name for instance"""
@@ -86,7 +138,7 @@ class DockerManager:
         environment = {
             "ACCEPT_EULA": "Y",
             "PRIVACY_CONSENT": "Y",
-            "DISPLAY": ":0",  # Required for RTX renderer even in headless mode
+            "DISPLAY": ":1",  # VNC Xvfb display
         }
         
         # GPU configuration
@@ -101,16 +153,14 @@ class DockerManager:
         
         # Build command for Isaac Sim
         if settings.enable_webrtc:
-            # WebRTC streaming mode with proper port configuration
+            # Use VNC-enabled startup script
             command = [
-                "./runheadless.sh",
-                "-v",  # Verbose logging during first run for shader cache
-                "--enable-webrtc-streaming",
-                f"--/exts/omni.services.transport.server.http/port={ports['http']}",
-                f"--/exts/omni.kit.streamsdk.plugins/rtcServerPort={ports['webrtc']}",
+                "/isaac-sim/start_with_vnc.sh",
+                "./isaac-sim.sh",  # Use full GUI version with VNC
+                "--allow-root",
             ]
         else:
-            command = ["./runheadless.sh", "-v"]
+            command = ["/isaac-sim/start_with_vnc.sh", "./runheadless.sh", "-v"]
         
         config = {
             "image": settings.isaac_sim_image,
@@ -148,6 +198,53 @@ class DockerManager:
         
         container_name = self._get_container_name(instance_id)
         
+        # Use subprocess if Python client not available
+        if self.client is None:
+            # Check if container exists
+            if self._container_exists(container_name):
+                status = self._get_container_status(container_name)
+                if status == "running" or "Up" in status:
+                    logger.info(f"Instance {instance_id} is already running")
+                    return self.get_instance_status(instance_id)
+                else:
+                    # Start existing stopped container
+                    logger.info(f"Starting existing container for instance {instance_id}")
+                    self._docker_cmd(['start', container_name])
+                    return self.get_instance_status(instance_id)
+            
+            # Create new container using subprocess
+            logger.info(f"Creating new container for instance {instance_id}")
+            config = self._build_container_config(instance_id)
+            
+            # Build docker run command
+            cmd = ['run', '-d', '--name', container_name]
+            cmd.extend(['--runtime', 'nvidia'])
+            cmd.extend(['--network', 'host'])
+            cmd.extend(['--shm-size', config['shm_size']])
+            cmd.extend(['--memory', config['mem_limit']])
+            cmd.extend(['--user', config['user']])
+            
+            # Add volumes
+            for host_path, bind_info in config['volumes'].items():
+                cmd.extend(['-v', f"{host_path}:{bind_info['bind']}"])
+            
+            # Add environment variables
+            for key, value in config['environment'].items():
+                cmd.extend(['-e', f"{key}={value}"])
+            
+            # Add device requests (GPU)
+            if config.get('device_requests'):
+                cmd.extend(['--gpus', 'all'])
+            
+            # Add image and command
+            cmd.append(config['image'])
+            cmd.extend(config['command'])
+            
+            self._docker_cmd(cmd)
+            logger.info(f"Successfully started instance {instance_id}")
+            return self.get_instance_status(instance_id)
+        
+        # Use Python client if available
         # Check if container already exists
         try:
             existing = self.client.containers.get(container_name)
@@ -188,6 +285,25 @@ class DockerManager:
         """
         container_name = self._get_container_name(instance_id)
         
+        # Use subprocess if Python client not available
+        if self.client is None:
+            if not self._container_exists(container_name):
+                logger.warning(f"Container for instance {instance_id} not found")
+                return self.get_instance_status(instance_id)
+            
+            status = self._get_container_status(container_name)
+            if status and ("running" in status.lower() or "up" in status.lower()):
+                logger.info(f"Stopping instance {instance_id}")
+                self._docker_cmd(['stop', container_name], check=False)
+            else:
+                logger.info(f"Instance {instance_id} is not running")
+            
+            if instance_id in self.containers:
+                del self.containers[instance_id]
+            
+            return self.get_instance_status(instance_id)
+        
+        # Use Python client if available
         try:
             container = self.client.containers.get(container_name)
             if container.status == "running":
@@ -231,6 +347,25 @@ class DockerManager:
         """
         container_name = self._get_container_name(instance_id)
         
+        # Use subprocess if Python client not available
+        if self.client is None:
+            if not self._container_exists(container_name):
+                logger.warning(f"Container for instance {instance_id} not found")
+                return {"status": "not_found", "instance_id": instance_id}
+            
+            # Stop if running
+            status = self._get_container_status(container_name)
+            if status and ("running" in status.lower() or "up" in status.lower()):
+                self._docker_cmd(['stop', container_name], check=False)
+            
+            # Remove container
+            self._docker_cmd(['rm', container_name], check=False)
+            if instance_id in self.containers:
+                del self.containers[instance_id]
+            logger.info(f"Removed instance {instance_id}")
+            return {"status": "removed", "instance_id": instance_id}
+        
+        # Use Python client if available
         try:
             container = self.client.containers.get(container_name)
             if container.status == "running":
@@ -260,6 +395,45 @@ class DockerManager:
         container_name = self._get_container_name(instance_id)
         ports = get_instance_ports(instance_id)
         
+        # Use subprocess if Python client not available
+        if self.client is None:
+            exists = self._container_exists(container_name)
+            if not exists:
+                return {
+                    "instance_id": instance_id,
+                    "status": "not_created",
+                    "ports": ports,
+                    "webrtc_url": f"http://localhost:{ports['http']}/streaming/webrtc-client/",
+                }
+            
+            status = self._get_container_status(container_name)
+            if status is None:
+                status = "unknown"
+            
+            # Get container ID
+            try:
+                result = self._docker_cmd(['ps', '-a', '--filter', f'name={container_name}', '--format', '{{.ID}}'], check=False)
+                container_id = result.stdout.strip()[:12] if result.stdout.strip() else ""
+            except Exception:
+                container_id = ""
+            
+            # Get created time
+            try:
+                result = self._docker_cmd(['inspect', '--format', '{{.Created}}', container_name], check=False)
+                created = result.stdout.strip() if result.returncode == 0 else ""
+            except Exception:
+                created = ""
+            
+            return {
+                "instance_id": instance_id,
+                "status": status,
+                "container_id": container_id,
+                "ports": ports,
+                "webrtc_url": f"http://localhost:{ports['http']}/streaming/webrtc-client/",
+                "created": created,
+            }
+        
+        # Use Python client if available
         try:
             container = self.client.containers.get(container_name)
             container.reload()  # Refresh container info
@@ -326,6 +500,18 @@ class DockerManager:
         """
         container_name = self._get_container_name(instance_id)
         
+        # Use subprocess if Python client not available
+        if self.client is None:
+            if not self._container_exists(container_name):
+                return f"Container for instance {instance_id} not found"
+            
+            try:
+                result = self._docker_cmd(['logs', '--tail', str(tail), '--timestamps', container_name], check=False)
+                return result.stdout if result.returncode == 0 else f"Error retrieving logs: {result.stderr}"
+            except Exception as e:
+                return f"Error retrieving logs: {str(e)}"
+        
+        # Use Python client if available
         try:
             container = self.client.containers.get(container_name)
             logs = container.logs(tail=tail, timestamps=True)

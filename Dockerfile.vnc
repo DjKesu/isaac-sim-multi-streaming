@@ -1,0 +1,89 @@
+# Dockerfile to add NoVNC capability to Isaac Sim
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
+
+# Install VNC server, noVNC, and dependencies
+USER root
+
+RUN apt-get update && apt-get install -y \
+    x11vnc \
+    xvfb \
+    supervisor \
+    net-tools \
+    python3-numpy \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install noVNC
+WORKDIR /opt
+RUN wget -qO- https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.tar.gz | tar xz \
+    && mv noVNC-1.4.0 noVNC \
+    && ln -s /opt/noVNC/vnc.html /opt/noVNC/index.html
+
+# Install websockify (required by noVNC)
+RUN wget -qO- https://github.com/novnc/websockify/archive/refs/tags/v0.11.0.tar.gz | tar xz \
+    && mv websockify-0.11.0 /opt/noVNC/utils/websockify
+
+# Create supervisor configuration
+RUN mkdir -p /var/log/supervisor
+COPY <<EOF /etc/supervisor/conf.d/supervisord.conf
+[supervisord]
+nodaemon=true
+logfile=/var/log/supervisor/supervisord.log
+pidfile=/var/run/supervisord.pid
+
+[program:xvfb]
+command=/usr/bin/Xvfb :1 -screen 0 1920x1080x24
+autorestart=true
+stdout_logfile=/var/log/supervisor/xvfb.log
+stderr_logfile=/var/log/supervisor/xvfb_err.log
+
+[program:x11vnc]
+command=/usr/bin/x11vnc -display :1 -xkb -forever -shared -repeat -nopw
+autorestart=true
+stdout_logfile=/var/log/supervisor/x11vnc.log
+stderr_logfile=/var/log/supervisor/x11vnc_err.log
+depends_on=xvfb
+
+[program:novnc]
+command=/opt/noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080
+autorestart=true
+stdout_logfile=/var/log/supervisor/novnc.log
+stderr_logfile=/var/log/supervisor/novnc_err.log
+depends_on=x11vnc
+EOF
+
+# Create startup script
+RUN cat > /isaac-sim/start_with_vnc.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# Start supervisor in background
+/usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf &
+
+# Wait for X server to be ready
+echo "Waiting for X server..."
+for i in {1..30}; do
+    if xdpyinfo -display :1 >/dev/null 2>&1; then
+        echo "X server is ready"
+        break
+    fi
+    sleep 1
+done
+
+# Set display for Isaac Sim
+export DISPLAY=:1
+
+# Execute Isaac Sim with passed arguments
+exec "$@"
+EOF
+
+RUN chmod +x /isaac-sim/start_with_vnc.sh
+
+# Switch back to isaac-sim user
+USER isaac-sim
+
+WORKDIR /isaac-sim
+
+# Default command
+CMD ["/isaac-sim/start_with_vnc.sh", "./isaac-sim.streaming.sh", "--no-window", "--allow-root"]
+

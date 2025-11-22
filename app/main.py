@@ -7,6 +7,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from .docker_manager import DockerManager
 from .models import (
@@ -84,8 +88,28 @@ async def root():
 async def health_check():
     """Health check endpoint"""
     try:
-        docker_manager.client.ping()
-        return {"status": "healthy", "docker": "connected"}
+        if not docker_manager.docker_available:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "unhealthy", "docker": "disconnected", "error": "Docker not available"}
+            )
+        
+        # Check if using Python client or subprocess fallback
+        if docker_manager.client is None:
+            # Using subprocess fallback - test with docker ps
+            import subprocess
+            result = subprocess.run(['docker', 'ps'], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                return {"status": "healthy", "docker": "connected", "method": "subprocess"}
+            else:
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"status": "unhealthy", "docker": "disconnected", "error": "Docker CLI test failed"}
+                )
+        else:
+            # Using Python client
+            docker_manager.client.ping()
+            return {"status": "healthy", "docker": "connected", "method": "python_client"}
     except Exception as e:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
